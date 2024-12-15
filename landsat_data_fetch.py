@@ -1,17 +1,21 @@
 import pandas as pd
 import requests
 import os
+from tqdm import tqdm
 
 # Constants
 M2M_API_URL = "https://m2m.cr.usgs.gov/api/api/json/stable"  # Base URL for USGS M2M API
 LOGIN_ENDPOINT = f"{M2M_API_URL}/login"
 SEARCH_ENDPOINT = f"{M2M_API_URL}/scene-search"
-DOWNLOAD_ENDPOINT = f"{M2M_API_URL}/download"
+DOWNLOAD_REQUEST_ENDPOINT = f"{M2M_API_URL}/download-request"  # Changed endpoint
 DOWNLOAD_OPTIONS_ENDPOINT = f"{M2M_API_URL}/download-options"
 
-USERNAME = "rohanth"  # Replace with your Earthdata username
-PASSWORD = "fmv@azm-cvh4HKW-egm"  # Replace with your Earthdata password
-API_TOKEN = "wm0DyYKik@qdHwdYloSFZwsaJPITZ0aCPljss67jttT9@dVSsSxuDDxb_pJD9uga"
+# USERNAME = "rohanth"  # Replace with your Earthdata username
+# PASSWORD = "fmv@azm-cvh4HKW-egm"  # Replace with your Earthdata password
+USERNAME = "ArjunGupta"  # Replace with your Earthdata username
+PASSWORD = "GJ86*gJKdv&i\"LM"  # Replace with your Earthdata password
+# API_TOKEN = "wm0DyYKik@qdHwdYloSFZwsaJPITZ0aCPljss67jttT9@dVSsSxuDDxb_pJD9uga"
+API_TOKEN = "RWHsOmS@KxK6lvrAVcj4N58L2Ub936ebsv@rpeibGyoA3ayArVU!gKLNqVnWE4br"
 
 # Authenticate and get an API key
 def get_api_key():
@@ -104,30 +108,53 @@ def get_product_id(api_key, entity_id, dataset):
         print(f"Error retrieving product ID: {response.status_code}, {response.text}")
         return None
 
-# Download the first scene
+# Modified download function
 def download_landsat_image(api_key, entity_id, product_id, output_folder):
     payload = {
-        "entityIds": [entity_id],
-        "productId": product_id
+        "downloads": [{
+            "entityId": entity_id,
+            "productId": product_id
+        }]
     }
     headers = {"X-Auth-Token": api_key}
-    response = requests.post(DOWNLOAD_ENDPOINT, json=payload, headers=headers)
+    
+    response = requests.post(DOWNLOAD_REQUEST_ENDPOINT, json=payload, headers=headers)
     if response.status_code == 200:
-        download_url = response.json().get("data", [])[0].get("url")
-        if download_url:
-            file_name = os.path.join(output_folder, os.path.basename(download_url))
-            print(f"Downloading: {download_url}")
-            file_response = requests.get(download_url)
-            if file_response.status_code == 200:
-                with open(file_name, "wb") as f:
-                    f.write(file_response.content)
-                print(f"Saved to {file_name}")
+        available_downloads = response.json().get("data", {}).get("availableDownloads", [])
+        if available_downloads:
+            download_url = available_downloads[0].get("url")
+            if download_url:
+                # Create a simpler filename using just the entity_id
+                file_name = os.path.join(output_folder, f"landsat_{entity_id}.tar.gz")
+                print(f"Downloading: {download_url}")
+                
+                # Stream the download with progress bar
+                file_response = requests.get(download_url, stream=True)
+                if file_response.status_code == 200:
+                    total_size = int(file_response.headers.get('content-length', 0))
+                    
+                    with open(file_name, "wb") as f:
+                        pbar = tqdm(
+                            total=total_size,
+                            desc=f"Downloading {entity_id}",
+                            unit='B',
+                            unit_scale=True,
+                            unit_divisor=1024,
+                            dynamic_ncols=True
+                        )
+                        for data in file_response.iter_content(chunk_size=1024):
+                            size = f.write(data)
+                            pbar.update(size)
+                        pbar.close()
+                    print(f"Saved to {file_name}")
+                else:
+                    print(f"Failed to download file: {file_response.status_code}")
             else:
-                print(f"Failed to download file: {file_response.status_code}")
+                print("No download URL found.")
         else:
-            print("No download URL found.")
+            print("No available downloads found in response.")
     else:
-        print(f"Error during download: {response.status_code}, {response.text}")
+        print(f"Error during download request: {response.status_code}, {response.text}")
 
 def fetch_landsat_images(csv_file, output_folder):
     api_key = get_api_key()

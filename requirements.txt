@@ -6,3 +6,4 @@ OWSlib
 pyproj
 soilgrids
 requests
+tqdm

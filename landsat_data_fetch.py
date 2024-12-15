@@ -2,6 +2,7 @@ import pandas as pd
 import requests
 import os
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Constants
 M2M_API_URL = "https://m2m.cr.usgs.gov/api/api/json/stable"  # Base URL for USGS M2M API
@@ -109,7 +110,7 @@ def get_product_id(api_key, entity_id, dataset):
         return None
 
 # Modified download function
-def download_landsat_image(api_key, entity_id, product_id, output_folder):
+def download_landsat_image(api_key, entity_id, product_id, output_folder, filename):
     payload = {
         "downloads": [{
             "entityId": entity_id,
@@ -125,7 +126,7 @@ def download_landsat_image(api_key, entity_id, product_id, output_folder):
             download_url = available_downloads[0].get("url")
             if download_url:
                 # Create a simpler filename using just the entity_id
-                file_name = os.path.join(output_folder, f"landsat_{entity_id}.tar.gz")
+                file_name = os.path.join(output_folder, filename)
                 print(f"Downloading: {download_url}")
                 
                 # Stream the download with progress bar
@@ -156,40 +157,72 @@ def download_landsat_image(api_key, entity_id, product_id, output_folder):
     else:
         print(f"Error during download request: {response.status_code}, {response.text}")
 
+def process_coordinate(api_key, latitude, longitude, dataset_name, output_folder):
+    print(f"Processing lat: {latitude}, lon: {longitude}")
+    scene = search_landsat_granules(api_key, latitude, longitude, dataset_name)
+    if scene:
+        entity_id = scene["entityId"]
+        product_id = get_product_id(api_key, entity_id, dataset_name)
+        if product_id:
+            filename = f"landsat_{entity_id}_lat{latitude:.4f}_lon{longitude:.4f}.tar.gz"
+            print(f"Downloading scene for Entity ID: {entity_id}")
+            download_landsat_image(api_key, entity_id, product_id, output_folder, filename)
+        else:
+            print(f"No valid product found for Entity ID: {entity_id}")
+    else:
+        print(f"No granules found for lat: {latitude}, lon: {longitude}")
+
 def fetch_landsat_images(csv_file, output_folder):
     api_key = get_api_key()
     if not api_key:
         print("Failed to authenticate.")
         return
 
-    # Use known dataset name directly
     dataset_name = "landsat_ot_c2_l2"
     print(f"Using dataset: {dataset_name}")
 
-    # Read CSV file
     data = pd.read_csv(csv_file)
 
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
 
-    for index, row in data.iterrows():
-        latitude = row["latitude"]
-        longitude = row["longitude"]
+    # Executor for downloads
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = []
+        # Perform searches sequentially
+        for index, row in data.iterrows():
+            latitude = row["latitude"]
+            longitude = row["longitude"]
 
-        print(f"Searching Landsat images for lat: {latitude}, lon: {longitude}")
-        scene = search_landsat_granules(api_key, latitude, longitude, dataset_name)
-        if scene:
-            entity_id = scene["entityId"]
-            product_id = get_product_id(api_key, entity_id, dataset_name)
-            if product_id:
-                print(f"Downloading scene with Entity ID: {entity_id} and Product ID: {product_id}")
-                download_landsat_image(api_key, entity_id, product_id, output_folder)
+            print(f"Processing lat: {latitude}, lon: {longitude}")
+            scene = search_landsat_granules(api_key, latitude, longitude, dataset_name)
+            if scene:
+                entity_id = scene["entityId"]
+                product_id = get_product_id(api_key, entity_id, dataset_name)
+                if product_id:
+                    filename = f"landsat_{entity_id}_lat{latitude:.4f}_lon{longitude:.4f}.tar.gz"
+                    # Submit download task to executor
+                    future = executor.submit(
+                        download_landsat_image,
+                        api_key,
+                        entity_id,
+                        product_id,
+                        output_folder,
+                        filename
+                    )
+                    futures.append(future)
+                    print(f"Scheduled download for Entity ID: {entity_id}")
+                else:
+                    print(f"No valid product found for Entity ID: {entity_id}")
             else:
-                print(f"No valid product found for Entity ID: {entity_id}")
-        else:
-            print(f"No granules found for lat: {latitude}, lon: {longitude}")
+                print(f"No granules found for lat: {latitude}, lon: {longitude}")
+
+        # Wait for all downloads to complete
+        for future in as_completed(futures):
+            future.result()
 
 # Example usage
-csv_file = "north_american_forests.csv"  # Path to your CSV file with 'latitude' and 'longitude' columns
-output_folder = "landsat_images"  # Folder to save downloaded images
-fetch_landsat_images(csv_file, output_folder)
+if __name__ == "__main__":
+    csv_file = "north_american_forests.csv"  # Path to your CSV file with 'latitude' and 'longitude' columns
+    output_folder = "landsat_images"  # Folder to save downloaded images
+    fetch_landsat_images(csv_file, output_folder)

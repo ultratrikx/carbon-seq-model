@@ -2,3 +2,5 @@
 /2landsat_images
 /venv
 /.ipynb_checkpoints
+/processed_data
+/2processed_data

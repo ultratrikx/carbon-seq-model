@@ -8,6 +8,8 @@ import pandas as pd
 import warnings
 import backoff
 import urllib3
+import tarfile
+from pathlib import Path
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from tqdm import tqdm
@@ -15,29 +17,49 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 warnings.filterwarnings("ignore")
 
 class LandsatFetcher:
-    def __init__(self, output_dir="landsat_images", max_workers=5):
+    def __init__(self, data_manager, max_workers=5):
         self.service_url = "https://m2m.cr.usgs.gov/api/api/json/stable/"
         self.api_key = None
-        self.output_dir = output_dir
+        self.data_manager = data_manager
+        self.output_dir = str(data_manager.landsat_dir)
         self.max_workers = max_workers
         self.desired_bands = ['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B7']
         self.band_patterns = [
             '_SR_B1.TIF', '_SR_B2.TIF', '_SR_B3.TIF',
             '_SR_B4.TIF', '_SR_B5.TIF', '_SR_B7.TIF'
         ]
+        self.required_files = [
+            '_SR_B1.TIF',  # Surface Reflectance Band 1
+            '_SR_B2.TIF',  # Surface Reflectance Band 2
+            '_SR_B3.TIF',  # Surface Reflectance Band 3
+            '_SR_B4.TIF',  # Surface Reflectance Band 4
+            '_SR_B5.TIF',  # Surface Reflectance Band 5
+            '_SR_B7.TIF',  # Surface Reflectance Band 7
+            '_MTL.txt'     # Metadata file
+        ]
+        self.required_bands = [
+            '_SR_B1.TIF',  # Surface Reflectance Band 1 
+            '_SR_B2.TIF',  # Surface Reflectance Band 2
+            '_SR_B3.TIF',  # Surface Reflectance Band 3
+            '_SR_B4.TIF',  # Surface Reflectance Band 4 
+            '_SR_B5.TIF',  # Surface Reflectance Band 5
+            '_SR_B7.TIF',  # Surface Reflectance Band 7
+            '_MTL.TXT'     # Metadata file
+        ]
         
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir)
 
-        # Configure requests session with retries
-        self.session = requests.Session()
-        retries = Retry(
-            total=5,
-            backoff_factor=1,
-            status_forcelist=[500, 502, 503, 504],
-            allowed_methods=["POST", "GET"]
-        )
-        self.session.mount('https://', HTTPAdapter(max_retries=retries))
+        # Create subdirectories for extracted bands
+        self.bands_dir = os.path.join(self.output_dir, "bands")
+        if not os.path.exists(self.bands_dir):
+            os.makedirs(self.bands_dir)
+
+        # Use urllib.parse instead of deprecated cgi module
+        from urllib.parse import unquote
+        self.unquote = unquote
+
+        self.scene_mappings = {}  # To store coordinate-to-scene mappings
 
     @backoff.on_exception(
         backoff.expo,
@@ -46,28 +68,39 @@ class LandsatFetcher:
     )
     def send_request(self, endpoint, data, api_key=None):
         """Send request to M2M API with retries and exponential backoff"""
-        json_data = json.dumps(data)
-        headers = {'X-Auth-Token': api_key} if api_key else {}
-        
-        try:
-            response = self.session.post(
-                self.service_url + endpoint, 
-                data=json_data,
-                headers=headers,
-                timeout=30
+        # Create a session for this request
+        with requests.Session() as session:
+            retries = Retry(
+                total=5,
+                backoff_factor=1,
+                status_forcelist=[500, 502, 503, 504],
+                allowed_methods=["POST", "GET"]
             )
-            response.raise_for_status()
+            adapter = HTTPAdapter(max_retries=retries)
+            session.mount('https://', adapter)
+
+            json_data = json.dumps(data)
+            headers = {'X-Auth-Token': api_key} if api_key else {}
             
-            output = response.json()
-            if output.get('errorCode'):
-                print(f"API Error: {output['errorCode']} - {output['errorMessage']}")
-                return False
+            try:
+                response = session.post(
+                    self.service_url + endpoint, 
+                    data=json_data,
+                    headers=headers,
+                    timeout=30
+                )
+                response.raise_for_status()
                 
-            return output.get('data')
-            
-        except requests.exceptions.RequestException as e:
-            print(f"Request failed: {str(e)}")
-            raise
+                output = response.json()
+                if output.get('errorCode'):
+                    print(f"API Error: {output['errorCode']} - {output['errorMessage']}")
+                    return False
+                    
+                return output.get('data')
+                
+            except requests.exceptions.RequestException as e:
+                print(f"Request failed: {str(e)}")
+                raise
 
     def login(self, username, token):
         """Login to M2M API using username and token"""
@@ -122,9 +155,10 @@ class LandsatFetcher:
         
         download_options = self.send_request("download-options", payload, self.api_key)
         if not download_options:
-            return None
+            print(f"No download options returned for entities: {entity_ids}")
+            return []
 
-        # Filter for Level-2 bundles that are available for direct download
+        # Filter for Level-2 bundles
         filtered_options = []
         for option in download_options:
             if (option.get('available') and 
@@ -158,34 +192,71 @@ class LandsatFetcher:
                 except Exception as e:
                     print(f"Download failed: {str(e)}")
 
-    def _download_single_file(self, download):
-        """Download a single file with retries"""
+    def extract_required_bands(self, tar_path, location_id):
+        """Extract bands and update data manager"""
+        scene_id = Path(tar_path).stem.split('.')[0]
+        print(f"\nExtracting required bands for {scene_id}")
+        
+        # Update data manager with scene ID
+        self.data_manager.update_landsat_scene(location_id, scene_id)
+        
+        # Create scene-specific directory
+        scene_dir = os.path.join(self.bands_dir, scene_id)
+        if not os.path.exists(scene_dir):
+            os.makedirs(scene_dir)
+        
+        with tarfile.open(tar_path) as tar:
+            members = tar.getmembers()
+            band_files = [m for m in members if any(band in m.name for band in self.required_bands)]
+            
+            for band_file in band_files:
+                band_file.name = os.path.basename(band_file.name)
+                dest_path = os.path.join(scene_dir, band_file.name)
+                
+                print(f"Extracting {band_file.name}")
+                with tar.extractfile(band_file) as source:
+                    with open(dest_path, 'wb') as target:
+                        target.write(source.read())
+                        
+        os.remove(tar_path)
+        print(f"Removed {tar_path} after extraction")
+        return scene_id
+
+    def _download_single_file(self, download, location_id=None):
+        """Download file with coordinate tracking"""
         url = download['url']
         print(f"Downloading: {url}")
         
         try:
-            response = self.session.get(url, stream=True)
-            response.raise_for_status()
-            
-            content_disposition = cgi.parse_header(response.headers['Content-Disposition'])[1]
-            filename = os.path.basename(content_disposition['filename'])
-            filepath = os.path.join(self.output_dir, filename)
-
-            total_size = int(response.headers.get('content-length', 0))
-            block_size = 8192
-            
-            with open(filepath, 'wb') as f:
-                with tqdm(total=total_size, unit='B', unit_scale=True) as pbar:
-                    for chunk in response.iter_content(chunk_size=block_size):
-                        if chunk:
-                            f.write(chunk)
-                            pbar.update(len(chunk))
-            
-            print(f"Successfully downloaded: {filename}")
-            return filepath
-            
+            # Create a new session for this download
+            with requests.Session() as session:
+                response = session.get(url, stream=True)
+                response.raise_for_status()
+                
+                # Use urllib.parse instead of cgi
+                content_disp = response.headers.get('Content-Disposition', '')
+                filename = content_disp.split('filename=')[-1].strip('"')
+                filename = self.unquote(filename)
+                filepath = os.path.join(self.output_dir, filename)
+    
+                total_size = int(response.headers.get('content-length', 0))
+                block_size = 8192
+                
+                with open(filepath, 'wb') as f:
+                    with tqdm(total=total_size, unit='B', unit_scale=True) as pbar:
+                        for chunk in response.iter_content(chunk_size=block_size):
+                            if chunk:
+                                f.write(chunk)
+                                pbar.update(len(chunk))
+                
+                print(f"Successfully downloaded: {filename}")
+    
+                # Extract bands and get scene ID
+                scene_id = self.extract_required_bands(filepath, location_id)
+                return filepath, scene_id
+                
         except Exception as e:
-            print(f"Download failed for {url}: {str(e)}")
+            print(f"Download or extraction failed for {url}: {str(e)}")
             raise
 
     def logout(self):
@@ -197,9 +268,9 @@ class LandsatFetcher:
         return False
 
     def process_coordinates(self, coordinates_df, batch_size=10):
-        """Process coordinates in parallel batches"""
+        """Process coordinates and update CSV with scene IDs"""
         try:
-            # Split coordinates into batches
+            # Process coordinates in batches
             coordinate_batches = [
                 coordinates_df[i:i + batch_size] 
                 for i in range(0, len(coordinates_df), batch_size)
@@ -215,7 +286,8 @@ class LandsatFetcher:
                         future = executor.submit(
                             self._process_single_coordinate,
                             row['latitude'],
-                            row['longitude']
+                            row['longitude'],
+                            row['location_id']
                         )
                         futures.append(future)
                     
@@ -227,6 +299,20 @@ class LandsatFetcher:
                             print(f"Batch processing error: {str(e)}")
                             continue
 
+            # Add scene IDs to DataFrame
+            scene_ids = []
+            for _, row in coordinates_df.iterrows():
+                coord_key = f"{row['latitude']:.4f}_{row['longitude']:.4f}"
+                scene_ids.append(self.scene_mappings.get(coord_key, None))
+            
+            # Update DataFrame with scene IDs
+            coordinates_df['scene_id'] = scene_ids
+            
+            # Save updated CSV
+            output_csv = os.path.join(self.output_dir, "coordinates_with_scenes.csv")
+            coordinates_df.to_csv(output_csv, index=False)
+            print(f"\nUpdated coordinates saved to: {output_csv}")
+            
         except Exception as e:
             print(f"Error processing coordinates: {str(e)}")
             raise
@@ -262,12 +348,11 @@ class LandsatFetcher:
             return scenes_df.iloc[0].to_dict()
         return None
 
-    def _process_single_coordinate(self, lat, lon):
-        """Process a single coordinate and download only the best scene"""
+    def _process_single_coordinate(self, lat, lon, location_id):
+        """Process a single coordinate and download the best scene"""
         try:
             print(f"Processing lat: {lat}, lon: {lon}")
             
-            # Search for scenes
             date_range = {'start': '2024-06-01', 'end': '2024-07-31'}
             scenes = self.search_scenes(lat, lon, date_range)
             
@@ -275,7 +360,6 @@ class LandsatFetcher:
                 print(f"No scenes found for {lat}, {lon}")
                 return
 
-            # Select best scene
             best_scene = self.select_best_scene(scenes)
             if not best_scene:
                 print(f"No suitable scenes found for {lat}, {lon}")
@@ -283,30 +367,42 @@ class LandsatFetcher:
 
             print(f"Selected best scene: {best_scene['displayId']} (Cloud cover: {best_scene['cloudCover']}%)")
             
-            # Get download options for best scene
             download_options = self.get_download_options([best_scene['entityId']])
             
             if not download_options:
                 print(f"No download options available for {best_scene['displayId']}")
                 return
 
-            # Request download for the bundle
+            # Request download for the full bundle
             products = [{
                 'entityId': option['entityId'],
                 'productId': option['id']
             } for option in download_options]
 
             if products:
-                # Request download
                 download_results = self.request_download(products)
                 
                 if download_results and 'availableDownloads' in download_results:
-                    self.download_files(download_results['availableDownloads'])
+                    # Pass location_id to download method
+                    with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                        futures = []
+                        for download in download_results['availableDownloads']:
+                            future = executor.submit(
+                                self._download_single_file,
+                                download,
+                                location_id
+                            )
+                            futures.append(future)
+                        
+                        for future in as_completed(futures):
+                            try:
+                                future.result()
+                            except Exception as e:
+                                print(f"Download failed: {str(e)}")
                 else:
                     print(f"Failed to get download URLs for {best_scene['displayId']}")
             else:
                 print(f"No valid products found for {best_scene['displayId']}")
-
         except Exception as e:
             print(f"Error processing coordinate {lat}, {lon}: {str(e)}")
             raise

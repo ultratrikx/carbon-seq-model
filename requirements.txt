@@ -2,3 +2,6 @@ pandas
 numpy
 matplotlib
 rasterio
+OWSlib
+pyproj
+soilgrids

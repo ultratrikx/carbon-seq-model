@@ -5,3 +5,4 @@ rasterio
 OWSlib
 pyproj
 soilgrids
+requests

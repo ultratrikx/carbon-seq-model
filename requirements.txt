@@ -7,3 +7,5 @@ pyproj
 soilgrids
 requests
 tqdm
+backoff
+urllib3

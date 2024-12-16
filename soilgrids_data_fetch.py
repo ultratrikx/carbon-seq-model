@@ -54,8 +54,8 @@ class SoilGridsFetcher:
                 south = y - self.buffer_size  
                 north = y + self.buffer_size
 
-                # Define resolution in degrees per pixel
-                resolution = 100  # meters/pixel
+                # Define resolution in meters per pixel
+                resolution = 30  # Adjusted resolution to 30 meters/pixel
 
                 # Calculate width and height based on buffer size and resolution
                 width = int((east - west) / resolution)

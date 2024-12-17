@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def main():
     # Initialize data manager
-    data_manager = DataManager("csv\\north_american_forests.csv")
+    data_manager = DataManager("csv\\data.csv")
     
     # Replace with your ERS credentials
     username = "ArjunGupta"

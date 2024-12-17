@@ -54,16 +54,16 @@ class SoilGridsFetcher:
                 south = y - self.buffer_size  
                 north = y + self.buffer_size
 
-                # Define resolution in meters per pixel
-                resolution = 30  # Adjusted resolution to 30 meters/pixel
-
                 # Calculate width and height based on buffer size and resolution
+                resolution = 30  # meters/pixel
                 width = int((east - west) / resolution)
                 height = int((north - south) / resolution)
 
                 # Create location directory
                 location_dir = os.path.join(self.data_dir, f"location_{location_id}")
                 Path(location_dir).mkdir(exist_ok=True)
+
+                download_success = True  # Track if all downloads are successful
 
                 # Download each carbon variable
                 for var_name, depths in self.variables.items():
@@ -74,7 +74,6 @@ class SoilGridsFetcher:
 
                             print(f"Downloading {self.variable_names[var_name]} ({depth})...")
                             
-                            # Use get_coverage_data directly instead of building URL
                             data = self.soil_grids.get_coverage_data(
                                 service_id=var_name,
                                 coverage_id=coverage_id,
@@ -88,8 +87,8 @@ class SoilGridsFetcher:
                                 output=output_file
                             )
 
-                            # Save metadata if download successful
-                            if data:
+                            # Check if file was created and has content
+                            if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
                                 meta_file = os.path.join(location_dir, f"{coverage_id}_metadata.txt")
                                 with open(meta_file, 'w') as f:
                                     f.write(f"Variable: {self.variable_names[var_name]}\n")
@@ -97,13 +96,26 @@ class SoilGridsFetcher:
                                     for key, value in self.soil_grids.metadata.items():
                                         f.write(f"{key}: {value}\n")
                                 print(f"Successfully downloaded: {coverage_id}")
+                            else:
+                                print(f"Download failed or empty file: {coverage_id}")
+                                download_success = False
+                                break
 
                         except Exception as e:
                             print(f"Error downloading {var_name} {depth}: {str(e)}")
+                            download_success = False
                             continue
 
-                # Update data manager after successful download
-                self.data_manager.update_soilgrids_id(location_id, str(location_id))
+                # Only update data manager if all downloads were successful
+                if download_success:
+                    self.data_manager.update_soilgrids_id(location_id, str(location_id))
+                else:
+                    # Clean up failed downloads
+                    if os.path.exists(location_dir):
+                        for file in os.listdir(location_dir):
+                            os.remove(os.path.join(location_dir, file))
+                        os.rmdir(location_dir)
+                    print(f"Failed to download all data for location {location_id}")
                 
             except Exception as e:
                 print(f"Error downloading data for location {location_id}: {str(e)}")

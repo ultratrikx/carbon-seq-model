@@ -82,7 +82,7 @@ def main():
     logging.info("Starting data fetch process")
     
     start_time = time.time()
-    data_manager = DataManager("csv\\north_american_forests.csv")
+    data_manager = DataManager("csv\\data.csv")
     
     # Load checkpoint and determine current stage
     checkpoint = data_manager.load_checkpoint()

@@ -14,6 +14,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from data_process import DataProcessor
 warnings.filterwarnings("ignore")
 
 class LandsatFetcher:
@@ -54,12 +55,25 @@ class LandsatFetcher:
         self.bands_dir = os.path.join(self.output_dir, "bands")
         if not os.path.exists(self.bands_dir):
             os.makedirs(self.bands_dir)
+        
+        # Create 'resampled' directory under 'bands'
+        self.resampled_dir = os.path.join(self.bands_dir, "resampled")
+        if not os.path.exists(self.resampled_dir):
+            os.makedirs(self.resampled_dir)
 
         # Use urllib.parse instead of deprecated cgi module
         from urllib.parse import unquote
         self.unquote = unquote
 
         self.scene_mappings = {}  # To store coordinate-to-scene mappings
+
+        # Initialize DataProcessor
+        self.processor = DataProcessor(
+            str(data_manager.soilgrids_dir),
+            str(data_manager.landsat_dir),
+            os.path.join(str(data_manager.landsat_dir), "resampled"),
+            os.path.join(str(data_manager.base_dir), "master_locations.csv")
+        )
 
     @backoff.on_exception(
         backoff.expo,
@@ -192,19 +206,19 @@ class LandsatFetcher:
                 except Exception as e:
                     print(f"Download failed: {str(e)}")
 
-    def extract_required_bands(self, tar_path, location_id):
-        """Extract bands and update data manager"""
+    def extract_and_resample_bands(self, tar_path, location_id):
+        """Extract bands, resample, and cleanup original files"""
         scene_id = Path(tar_path).stem.split('.')[0]
-        print(f"\nExtracting required bands for {scene_id}")
+        print(f"\nProcessing {scene_id}")
         
         # Update data manager with scene ID
         self.data_manager.update_landsat_scene(location_id, scene_id)
         
-        # Create scene-specific directory
         scene_dir = os.path.join(self.bands_dir, scene_id)
         if not os.path.exists(scene_dir):
             os.makedirs(scene_dir)
         
+        extracted_files = []
         with tarfile.open(tar_path) as tar:
             members = tar.getmembers()
             band_files = [m for m in members if any(band in m.name for band in self.required_bands)]
@@ -217,9 +231,44 @@ class LandsatFetcher:
                 with tar.extractfile(band_file) as source:
                     with open(dest_path, 'wb') as target:
                         target.write(source.read())
-                        
+                extracted_files.append(dest_path)
+        
+        # Delete tar file immediately after extraction
         os.remove(tar_path)
-        print(f"Removed {tar_path} after extraction")
+        
+        # Find corresponding SoilGrids file
+        soilgrids_file = os.path.join(
+            str(self.data_manager.soilgrids_dir),
+            "tifs",
+            f"location_{location_id}",
+            "soc_0-5cm_mean.TIF"
+        )
+        
+        # Resample each extracted band and delete original
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            resample_futures = []
+            for file in extracted_files:
+                if file.endswith('.TIF'):
+                    output_path = os.path.join(
+                        self.resampled_dir,
+                        f"resampled_{location_id}_{os.path.basename(file)}"
+                    )
+                    future = executor.submit(
+                        self.processor.resample_landsat,
+                        file,
+                        soilgrids_file,
+                        output_path
+                    )
+                    resample_futures.append((future, file))
+            
+            # Wait for all resampling to complete
+            for future, file in resample_futures:
+                try:
+                    if future.result():
+                        print(f"Successfully resampled and removed: {file}")
+                except Exception as e:
+                    print(f"Error processing {file}: {str(e)}")
+        
         return scene_id
 
     def _download_single_file(self, download, location_id=None):
@@ -252,7 +301,7 @@ class LandsatFetcher:
                 print(f"Successfully downloaded: {filename}")
     
                 # Extract bands and get scene ID
-                scene_id = self.extract_required_bands(filepath, location_id)
+                scene_id = self.extract_and_resample_bands(filepath, location_id)
                 return filepath, scene_id
                 
         except Exception as e:

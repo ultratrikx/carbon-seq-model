@@ -22,47 +22,56 @@ class DataProcessor:
     
     def resample_landsat(self, landsat_image, soilgrids_image, output_path):
         """Resample Landsat image to match the resolution and extent of SoilGrids image"""
-        # Open both datasets simultaneously
-        with rasterio.open(soilgrids_image) as soil_ds, rasterio.open(landsat_image) as landsat_ds:
-            # Get SoilGrids metadata
-            soil_transform = soil_ds.transform
-            soil_crs = soil_ds.crs
-            soil_width = soil_ds.width
-            soil_height = soil_ds.height
-            
-            # Get the profile from SoilGrids and update it
-            output_profile = soil_ds.profile.copy()
-            
-            # Read and resample Landsat data
-            landsat_data = landsat_ds.read()
-            landsat_resampled = np.empty(
-                shape=(landsat_data.shape[0], soil_height, soil_width), 
-                dtype=landsat_data.dtype
-            )
-            
-            # Reproject and resample each band
-            for i in range(landsat_data.shape[0]):
-                reproject(
-                    source=landsat_data[i],
-                    destination=landsat_resampled[i],
-                    src_transform=landsat_ds.transform,
-                    src_crs=landsat_ds.crs,
-                    dst_transform=soil_transform,
-                    dst_crs=soil_crs,
-                    resampling=Resampling.average
+        try:
+            # Open both datasets simultaneously
+            with rasterio.open(soilgrids_image) as soil_ds, rasterio.open(landsat_image) as landsat_ds:
+                # Get SoilGrids metadata
+                soil_transform = soil_ds.transform
+                soil_crs = soil_ds.crs
+                soil_width = soil_ds.width
+                soil_height = soil_ds.height
+                
+                # Get the profile from SoilGrids and update it
+                output_profile = soil_ds.profile.copy()
+                
+                # Read and resample Landsat data
+                landsat_data = landsat_ds.read()
+                landsat_resampled = np.empty(
+                    shape=(landsat_data.shape[0], soil_height, soil_width), 
+                    dtype=landsat_data.dtype
+                )
+                
+                # Reproject and resample each band
+                for i in range(landsat_data.shape[0]):
+                    reproject(
+                        source=landsat_data[i],
+                        destination=landsat_resampled[i],
+                        src_transform=landsat_ds.transform,
+                        src_crs=landsat_ds.crs,
+                        dst_transform=soil_transform,
+                        dst_crs=soil_crs,
+                        resampling=Resampling.average
+                    )
+
+                # Update profile for output
+                output_profile.update(
+                    dtype=landsat_data.dtype,
+                    count=landsat_data.shape[0],
+                    compress='lzw',       # Add compression
+                    nodata=0              # Set nodata to a valid value for uint16
                 )
 
-            # Update profile for output
-            output_profile.update(
-                dtype=landsat_data.dtype,
-                count=landsat_data.shape[0],
-                compress='lzw',       # Add compression
-                nodata=0              # Set nodata to a valid value for uint16
-            )
+                # Write resampled data
+                with rasterio.open(output_path, 'w', **output_profile) as dst:
+                    dst.write(landsat_resampled)
 
-            # Write resampled data
-            with rasterio.open(output_path, 'w', **output_profile) as dst:
-                dst.write(landsat_resampled)
+            # Delete original Landsat image after successful resampling
+            os.remove(landsat_image)
+            print(f"Deleted original file: {landsat_image}")
+            return True
+        except Exception as e:
+            print(f"Error during resampling: {str(e)}")
+            return False
 
     def process_all_images(self):
         """Process all Landsat images to match SoilGrids images"""

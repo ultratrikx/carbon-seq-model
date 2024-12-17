@@ -1,7 +1,7 @@
-/landsat_images
-/2landsat_images
+/misc/landsat_images
+/misc/2landsat_images
+/misc/2processed_data
 /venv
 /.ipynb_checkpoints
 /processed_data
-/2processed_data
 /__pycache__

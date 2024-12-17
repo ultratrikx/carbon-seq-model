@@ -19,31 +19,41 @@ def main():
         return
     
     try:
-        # Define a function to process a single location
-        def process_location(row):
-            location_id = row['location_id']
-            lat = row['latitude']
-            lon = row['longitude']
-            
-            # Fetch Landsat data
-            landsat._process_single_coordinate(lat, lon, location_id)
-            
-            # Fetch SoilGrids data
-            soilgrids.get_location_data(lat, lon, location_id)
+        # First, process all SoilGrids data
+        print("\nDownloading SoilGrids data...")
+        for _, row in data_manager.data.iterrows():
+            try:
+                soilgrids.get_location_data(
+                    row['latitude'],
+                    row['longitude'],
+                    row['location_id']
+                )
+            except Exception as e:
+                print(f"Error downloading SoilGrids data for location {row['location_id']}: {str(e)}")
         
-        # Process all locations concurrently
+        # Then process Landsat data
+        print("\nDownloading and processing Landsat data...")
         with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [executor.submit(process_location, row) for _, row in data_manager.data.iterrows()]
+            futures = []
+            for _, row in data_manager.data.iterrows():
+                if row['soilgrids_id']:  # Only process if we have SoilGrids data
+                    future = executor.submit(
+                        landsat._process_single_coordinate,
+                        row['latitude'],
+                        row['longitude'],
+                        row['location_id']
+                    )
+                    futures.append(future)
             
             for future in as_completed(futures):
                 try:
                     future.result()
                 except Exception as e:
-                    print(f"Error processing location: {str(e)}")
+                    print(f"Error processing Landsat data: {str(e)}")
         
         # Get locations with complete data
         complete_data = data_manager.get_collocated_data()
-        print(f"Successfully processed {len(complete_data)} locations with both datasets")
+        print(f"\nSuccessfully processed {len(complete_data)} locations with both datasets")
     
     finally:
         landsat.logout()

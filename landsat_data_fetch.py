@@ -9,6 +9,7 @@ import warnings
 import backoff
 import urllib3
 import tarfile
+import logging
 from pathlib import Path
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -16,6 +17,9 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from data_process import DataProcessor
 warnings.filterwarnings("ignore")
+
+USERNAME = "ArjunGupta"
+TOKEN = "RWHsOmS@KxK6lvrAVcj4N58L2Ub936ebsv@rpeibGyoA3ayArVU!gKLNqVnWE4br"
 
 class LandsatFetcher:
     def __init__(self, data_manager, max_workers=5):
@@ -403,63 +407,95 @@ class LandsatFetcher:
         return None
 
     def _process_single_coordinate(self, lat, lon, location_id):
-        """Process a single coordinate and download the best scene"""
-        try:
-            print(f"Processing lat: {lat}, lon: {lon}")
-            
-            date_range = {'start': '2024-06-01', 'end': '2024-07-31'}
-            scenes = self.search_scenes(lat, lon, date_range)
-            
-            if not scenes:
-                print(f"No scenes found for {lat}, {lon}")
-                return
-
-            best_scene = self.select_best_scene(scenes)
-            if not best_scene:
-                print(f"No suitable scenes found for {lat}, {lon}")
-                return
-
-            print(f"Selected best scene: {best_scene['displayId']} (Cloud cover: {best_scene['cloudCover']}%)")
-            
-            download_options = self.get_download_options([best_scene['entityId']])
-            
-            if not download_options:
-                print(f"No download options available for {best_scene['displayId']}")
-                return
-
-            # Request download for the full bundle
-            products = [{
-                'entityId': option['entityId'],
-                'productId': option['id']
-            } for option in download_options]
-
-            if products:
-                download_results = self.request_download(products)
+        retries = 3
+        success = False  # Track if we've successfully downloaded
+        
+        for attempt in range(retries):
+            try:
+                if success:  # Skip retry if we've already succeeded
+                    break
+                    
+                if attempt > 0:
+                    logging.info(f"Retry attempt {attempt+1} for location {location_id}")
+                    if not self.refresh_api_key():
+                        raise Exception("Failed to refresh API key")
+                    time.sleep(5 * attempt)  # Exponential backoff
                 
-                if download_results and 'availableDownloads' in download_results:
-                    # Pass location_id to download method
-                    with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                        futures = []
-                        for download in download_results['availableDownloads']:
-                            future = executor.submit(
-                                self._download_single_file,
-                                download,
-                                location_id
-                            )
-                            futures.append(future)
-                        
-                        for future in as_completed(futures):
-                            try:
-                                future.result()
-                            except Exception as e:
-                                print(f"Download failed: {str(e)}")
+                print(f"Processing lat: {lat}, lon: {lon}")
+                
+                date_range = {'start': '2024-06-01', 'end': '2024-07-31'}
+                scenes = self.search_scenes(lat, lon, date_range)
+                
+                if not scenes:
+                    print(f"No scenes found for {lat}, {lon}")
+                    return
+
+                best_scene = self.select_best_scene(scenes)
+                if not best_scene:
+                    print(f"No suitable scenes found for {lat}, {lon}")
+                    return
+
+                print(f"Selected best scene: {best_scene['displayId']} (Cloud cover: {best_scene['cloudCover']}%)")
+                
+                download_options = self.get_download_options([best_scene['entityId']])
+                
+                if not download_options:
+                    print(f"No download options available for {best_scene['displayId']}")
+                    return
+
+                products = [{
+                    'entityId': option['entityId'],
+                    'productId': option['id']
+                } for option in download_options]
+
+                if products:
+                    download_results = self.request_download(products)
+                    
+                    if download_results and 'availableDownloads' in download_results:
+                        download_success = True  # Track success for this batch
+                        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                            futures = []
+                            for download in download_results['availableDownloads']:
+                                future = executor.submit(
+                                    self._download_single_file,
+                                    download,
+                                    location_id
+                                )
+                                futures.append(future)
+                            
+                            # Wait for all downloads to complete
+                            for future in as_completed(futures):
+                                try:
+                                    result = future.result()
+                                    if result:  # If download was successful
+                                        success = True  # Mark overall process as successful
+                                        self.data_manager._save_data()  # Save progress
+                                except Exception as e:
+                                    print(f"Download failed: {str(e)}")
+                                    download_success = False
+                            
+                            if download_success:
+                                break  # Exit retry loop if downloads were successful
+                    else:
+                        print(f"Failed to get download URLs for {best_scene['displayId']}")
                 else:
-                    print(f"Failed to get download URLs for {best_scene['displayId']}")
-            else:
-                print(f"No valid products found for {best_scene['displayId']}")
+                    print(f"No valid products found for {best_scene['displayId']}")
+                    return  # No need to retry if no products found
+                    
+            except Exception as e:
+                print(f"Error processing coordinate {lat}, lon: {str(e)}")
+                if attempt == retries - 1:  # Only raise on final attempt
+                    raise
+
+    def refresh_api_key(self):
+        """Refresh API key to prevent session timeout"""
+        try:
+            self.logout()
+            time.sleep(1)
+            return self.login(USERNAME, TOKEN)
         except Exception as e:
-            print(f"Error processing coordinate {lat}, lon: {str(e)}")
-            raise
+            logging.error(f"Failed to refresh API key: {str(e)}")
+            return False
 
 def main():
     fetcher = LandsatFetcher()

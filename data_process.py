@@ -4,6 +4,8 @@ import rasterio
 from rasterio.warp import reproject, Resampling
 from pathlib import Path
 import pandas as pd
+from rasterio.windows import Window
+from rasterio.transform import from_bounds
 
 class DataProcessor:
     def __init__(self, soilgrids_dir, landsat_dir, output_dir, locations_csv):
@@ -18,60 +20,94 @@ class DataProcessor:
         self.location_map = dict(zip(
             self.locations_df['landsat_scene_id'],
             self.locations_df['location_id']
-        ))
+         ))
+        self.target_dimensions = (128, 128)  # Fixed dimensions matching SoilGrids
+        self.target_resolution = 30  # meters per pixel
     
     def resample_landsat(self, landsat_image, soilgrids_image, output_path):
-        """Resample Landsat image to match the resolution and extent of SoilGrids image"""
+        """Resample Landsat image to match SoilGrids exactly in geography and resolution"""
         try:
-            # Open both datasets simultaneously
             with rasterio.open(soilgrids_image) as soil_ds, rasterio.open(landsat_image) as landsat_ds:
-                # Get SoilGrids metadata
-                soil_transform = soil_ds.transform
-                soil_crs = soil_ds.crs
-                soil_width = soil_ds.width
-                soil_height = soil_ds.height
+                # Get the exact geographical bounds from SoilGrids
+                soil_bounds = soil_ds.bounds
                 
-                # Get the profile from SoilGrids and update it
-                output_profile = soil_ds.profile.copy()
-                
-                # Read and resample Landsat data
-                landsat_data = landsat_ds.read()
-                landsat_resampled = np.empty(
-                    shape=(landsat_data.shape[0], soil_height, soil_width), 
-                    dtype=landsat_data.dtype
+                # Create transform that exactly matches SoilGrids pixels
+                output_transform = from_bounds(
+                    soil_bounds.left, soil_bounds.bottom,
+                    soil_bounds.right, soil_bounds.top,
+                    self.target_dimensions[1], self.target_dimensions[0]
                 )
                 
-                # Reproject and resample each band
-                for i in range(landsat_data.shape[0]):
+                # Create output profile with exact matching
+                output_profile = soil_ds.profile.copy()
+                output_profile.update({
+                    'dtype': 'uint16',
+                    'count': landsat_ds.count,
+                    'width': self.target_dimensions[1],
+                    'height': self.target_dimensions[0],
+                    'transform': output_transform,
+                    'crs': soil_ds.crs,  # Use SoilGrids CRS
+                    'compress': 'lzw',
+                    'nodata': 0
+                })
+                
+                # Create output array
+                landsat_resampled = np.zeros(
+                    (landsat_ds.count, self.target_dimensions[0], self.target_dimensions[1]),
+                    dtype=np.uint16
+                )
+                
+                # Reproject each band to exactly match SoilGrids
+                for i in range(landsat_ds.count):
                     reproject(
-                        source=landsat_data[i],
+                        source=landsat_ds.read(i + 1),
                         destination=landsat_resampled[i],
                         src_transform=landsat_ds.transform,
                         src_crs=landsat_ds.crs,
-                        dst_transform=soil_transform,
-                        dst_crs=soil_crs,
-                        resampling=Resampling.average
+                        dst_transform=output_transform,
+                        dst_crs=soil_ds.crs,
+                        resampling=Resampling.average,
+                        src_nodata=landsat_ds.nodata,
+                        dst_nodata=0
                     )
-
-                # Update profile for output
-                output_profile.update(
-                    dtype=landsat_data.dtype,
-                    count=landsat_data.shape[0],
-                    compress='lzw',       # Add compression
-                    nodata=0              # Set nodata to a valid value for uint16
-                )
-
+                    # Ensure valid range
+                    landsat_resampled[i] = np.clip(landsat_resampled[i], 0, 65535)
+                
                 # Write resampled data
                 with rasterio.open(output_path, 'w', **output_profile) as dst:
                     dst.write(landsat_resampled)
+                    
+                    # Add georeferencing metadata
+                    dst.update_tags(
+                        TIFFTAG_GEOTIFF_VERSION='1.1.0',
+                        TIFFTAG_GEOTIFF_KEYS=f'Aligned to SoilGrids image: {os.path.basename(soilgrids_image)}'
+                    )
 
-            # Delete original Landsat image after successful resampling
+            # Verify alignment
+            self._verify_alignment(output_path, soilgrids_image)
+            
+            # Cleanup original
             os.remove(landsat_image)
-            print(f"Deleted original file: {landsat_image}")
+            print(f"Successfully resampled and aligned: {landsat_image}")
             return True
+            
         except Exception as e:
             print(f"Error during resampling: {str(e)}")
             return False
+
+    def _verify_alignment(self, resampled_path, reference_path):
+        """Verify that images are exactly aligned"""
+        with rasterio.open(resampled_path) as resampled, rasterio.open(reference_path) as reference:
+            # Check spatial properties
+            if not np.allclose(resampled.bounds, reference.bounds, rtol=1e-5):
+                print("Warning: Image bounds do not exactly match")
+            if not np.allclose(resampled.transform, reference.transform, rtol=1e-5):
+                print("Warning: Image transforms do not exactly match")
+            if resampled.crs != reference.crs:
+                print("Warning: Image CRS do not match")
+            if (resampled.width != reference.width or 
+                resampled.height != reference.height):
+                print("Warning: Image dimensions do not match")
 
     def process_all_images(self):
         """Process all Landsat images to match SoilGrids images"""

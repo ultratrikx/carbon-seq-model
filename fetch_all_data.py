@@ -1,3 +1,4 @@
+import os
 from data_manager import DataManager
 from landsat_data_fetch import LandsatFetcher
 from soilgrids_data_fetch import SoilGridsFetcher
@@ -5,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def main():
     # Initialize data manager
-    data_manager = DataManager("north_american_forests.csv")
+    data_manager = DataManager("csv\\north_american_forests.csv")
     
     # Replace with your ERS credentials
     username = "ArjunGupta"
@@ -28,6 +29,7 @@ def main():
                     row['longitude'],
                     row['location_id']
                 )
+                # Removed storage logging here
             except Exception as e:
                 print(f"Error downloading SoilGrids data for location {row['location_id']}: {str(e)}")
         
@@ -48,9 +50,11 @@ def main():
             for future in as_completed(futures):
                 try:
                     future.result()
+                    # Removed storage logging here
                 except Exception as e:
                     print(f"Error processing Landsat data: {str(e)}")
         
+        # Removed final storage logging
         # Get locations with complete data
         complete_data = data_manager.get_collocated_data()
         print(f"\nSuccessfully processed {len(complete_data)} locations with both datasets")

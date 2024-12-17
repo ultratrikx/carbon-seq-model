@@ -2,11 +2,12 @@ import pandas as pd
 import numpy as np
 from soilgrids import SoilGrids
 import matplotlib.pyplot as plt 
-import os
 from pathlib import Path
 import rasterio
 from pyproj import Transformer
 import requests
+from tqdm import tqdm
+import os
 
 class SoilGridsFetcher:
     def __init__(self, data_manager):
@@ -40,7 +41,6 @@ class SoilGridsFetcher:
 
     def get_location_data(self, lat, lon, location_id):
         """Download SOC/OCD data and update data manager"""
-        # Create a session for this download
         with requests.Session() as session:
             try:
                 print(f"Processing location {location_id} ({lat, lon})")
@@ -73,6 +73,8 @@ class SoilGridsFetcher:
                             output_file = os.path.join(location_dir, f"{coverage_id}.tif")
 
                             print(f"Downloading {self.variable_names[var_name]} ({depth})...")
+                            
+                            # Use get_coverage_data directly instead of building URL
                             data = self.soil_grids.get_coverage_data(
                                 service_id=var_name,
                                 coverage_id=coverage_id,
@@ -80,22 +82,25 @@ class SoilGridsFetcher:
                                 south=south,
                                 east=east,  
                                 north=north,
-                                crs="urn:ogc:def:crs:EPSG::3857",  # Updated CRS
-                                width=width,    # Added width
-                                height=height,  # Added height
+                                crs="urn:ogc:def:crs:EPSG::3857",
+                                width=width,
+                                height=height,
                                 output=output_file
                             )
 
-                            # Save metadata
-                            meta_file = os.path.join(location_dir, f"{coverage_id}_metadata.txt")
-                            with open(meta_file, 'w') as f:
-                                f.write(f"Variable: {self.variable_names[var_name]}\n")
-                                f.write(f"Depth: {depth}\n")
-                                for key, value in self.soil_grids.metadata.items():
-                                    f.write(f"{key}: {value}\n")
+                            # Save metadata if download successful
+                            if data:
+                                meta_file = os.path.join(location_dir, f"{coverage_id}_metadata.txt")
+                                with open(meta_file, 'w') as f:
+                                    f.write(f"Variable: {self.variable_names[var_name]}\n")
+                                    f.write(f"Depth: {depth}\n")
+                                    for key, value in self.soil_grids.metadata.items():
+                                        f.write(f"{key}: {value}\n")
+                                print(f"Successfully downloaded: {coverage_id}")
 
                         except Exception as e:
                             print(f"Error downloading {var_name} {depth}: {str(e)}")
+                            continue
 
                 # Update data manager after successful download
                 self.data_manager.update_soilgrids_id(location_id, str(location_id))
@@ -121,7 +126,7 @@ class SoilGridsFetcher:
 
 def main():
     fetcher = SoilGridsFetcher()
-    fetcher.process_coordinates("north_american_forests.csv")
+    fetcher.process_coordinates("/csv/north_american_forests.csv")
 
 if __name__ == "__main__":
     main()

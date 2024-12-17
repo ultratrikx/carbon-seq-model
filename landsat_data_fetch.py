@@ -56,7 +56,7 @@ class LandsatFetcher:
         if not os.path.exists(self.bands_dir):
             os.makedirs(self.bands_dir)
         
-        # Create 'resampled' directory under 'bands'
+        # Correct the resampled directory path to prevent extra 'resampled' folder creation
         self.resampled_dir = os.path.join(self.bands_dir, "resampled")
         if not os.path.exists(self.resampled_dir):
             os.makedirs(self.resampled_dir)
@@ -67,11 +67,11 @@ class LandsatFetcher:
 
         self.scene_mappings = {}  # To store coordinate-to-scene mappings
 
-        # Initialize DataProcessor
+        # Initialize DataProcessor with the correct resampled directory
         self.processor = DataProcessor(
             str(data_manager.soilgrids_dir),
             str(data_manager.landsat_dir),
-            os.path.join(str(data_manager.landsat_dir), "resampled"),
+            self.resampled_dir,  # Corrected resampled directory
             os.path.join(str(data_manager.base_dir), "master_locations.csv")
         )
 
@@ -269,6 +269,11 @@ class LandsatFetcher:
                 except Exception as e:
                     print(f"Error processing {file}: {str(e)}")
         
+        # After resampling, delete the scene directory if it's empty
+        if not os.listdir(scene_dir):
+            os.rmdir(scene_dir)
+            print(f"Deleted empty scene directory: {scene_dir}")
+
         return scene_id
 
     def _download_single_file(self, download, location_id=None):
@@ -453,7 +458,7 @@ class LandsatFetcher:
             else:
                 print(f"No valid products found for {best_scene['displayId']}")
         except Exception as e:
-            print(f"Error processing coordinate {lat}, {lon}: {str(e)}")
+            print(f"Error processing coordinate {lat}, lon: {str(e)}")
             raise
 
 def main():
@@ -468,7 +473,7 @@ def main():
     
     try:
         # Read coordinates from CSV
-        coords_df = pd.read_csv("north_american_forests.csv")
+        coords_df = pd.read_csv("csv\\north_american_forests.csv")
         fetcher.process_coordinates(coords_df)
     finally:
         fetcher.logout()

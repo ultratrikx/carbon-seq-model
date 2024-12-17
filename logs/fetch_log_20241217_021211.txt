@@ -1,9 +1,0 @@
-2024-12-17 02:12:11,224 - INFO - Starting data fetch process
-2024-12-17 02:12:11,848 - INFO - Processing 10 locations
-2024-12-17 02:12:11,850 - INFO - Processing batch 1 of 1
-2024-12-17 02:16:50,725 - INFO - Progress: 10/10 locations
-2024-12-17 02:16:50,728 - INFO - Estimated time remaining: 0:00:00
-2024-12-17 02:16:50,731 - INFO - Success rate: 20/10 (0 errors)
-2024-12-17 02:16:52,735 - INFO - Final results: 10 locations with complete data
-2024-12-17 02:16:52,737 - INFO - Total processing time: 0:04:41
-2024-12-17 02:16:52,994 - INFO - Process completed

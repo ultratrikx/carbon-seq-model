@@ -215,70 +215,126 @@ class LandsatFetcher:
         scene_id = Path(tar_path).stem.split('.')[0]
         print(f"\nProcessing {scene_id}")
         
-        # Update data manager with scene ID
-        self.data_manager.update_landsat_scene(location_id, scene_id)
-        
-        scene_dir = os.path.join(self.bands_dir, scene_id)
-        if not os.path.exists(scene_dir):
-            os.makedirs(scene_dir)
-        
-        extracted_files = []
-        with tarfile.open(tar_path) as tar:
-            members = tar.getmembers()
-            band_files = [m for m in members if any(band in m.name for band in self.required_bands)]
+        try:
+            # Update data manager with scene ID
+            self.data_manager.update_landsat_scene(location_id, scene_id)
             
-            for band_file in band_files:
-                band_file.name = os.path.basename(band_file.name)
-                dest_path = os.path.join(scene_dir, band_file.name)
+            scene_dir = os.path.join(self.bands_dir, scene_id)
+            if not os.path.exists(scene_dir):
+                os.makedirs(scene_dir)
+            
+            extracted_files = []
+            with tarfile.open(tar_path) as tar:
+                members = tar.getmembers()
+                band_files = [m for m in members if any(band in m.name for band in self.required_bands)]
                 
-                print(f"Extracting {band_file.name}")
-                with tar.extractfile(band_file) as source:
-                    with open(dest_path, 'wb') as target:
-                        target.write(source.read())
-                extracted_files.append(dest_path)
-        
-        # Delete tar file immediately after extraction
-        os.remove(tar_path)
-        
-        # Find corresponding SoilGrids file
-        soilgrids_file = os.path.join(
-            str(self.data_manager.soilgrids_dir),
-            "tifs",
-            f"location_{location_id}",
-            "soc_0-5cm_mean.TIF"
-        )
-        
-        # Resample each extracted band and delete original
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            resample_futures = []
-            for file in extracted_files:
-                if file.endswith('.TIF'):
-                    output_path = os.path.join(
-                        self.resampled_dir,
-                        f"resampled_{location_id}_{os.path.basename(file)}"
-                    )
-                    future = executor.submit(
-                        self.processor.resample_landsat,
-                        file,
-                        soilgrids_file,
-                        output_path
-                    )
-                    resample_futures.append((future, file))
+                for band_file in band_files:
+                    band_file.name = os.path.basename(band_file.name)
+                    dest_path = os.path.join(scene_dir, band_file.name)
+                    
+                    print(f"Extracting {band_file.name}")
+                    with tar.extractfile(band_file) as source:
+                        with open(dest_path, 'wb') as target:
+                            target.write(source.read())
+                    extracted_files.append(dest_path)
             
-            # Wait for all resampling to complete
-            for future, file in resample_futures:
-                try:
-                    if future.result():
-                        print(f"Successfully resampled and removed: {file}")
-                except Exception as e:
-                    print(f"Error processing {file}: {str(e)}")
-        
-        # After resampling, delete the scene directory if it's empty
-        if not os.listdir(scene_dir):
-            os.rmdir(scene_dir)
-            print(f"Deleted empty scene directory: {scene_dir}")
+            # Delete tar file immediately after extraction
+            os.remove(tar_path)
+            
+            # Save checkpoint after successful extraction
+            self.data_manager.save_checkpoint(
+                -1,
+                0,
+                0,
+                f'landsat_extract_{location_id}'
+            )
+            
+            # Find corresponding SoilGrids file
+            soilgrids_file = os.path.join(
+                str(self.data_manager.soilgrids_dir),
+                "tifs",
+                f"location_{location_id}",
+                "soc_0-5cm_mean.TIF"
+            )
+            
+            if not os.path.exists(soilgrids_file):
+                raise Exception(f"SoilGrids file not found for location {location_id}")
+            
+            resampling_success = True
+            resampled_files = []
+            
+            # Resample each extracted band and delete original
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                resample_futures = []
+                for file in extracted_files:
+                    if file.endswith('.TIF'):
+                        output_path = os.path.join(
+                            self.resampled_dir,
+                            f"resampled_{location_id}_{os.path.basename(file)}"
+                        )
+                        future = executor.submit(
+                            self.processor.resample_landsat,
+                            file,
+                            soilgrids_file,
+                            output_path
+                        )
+                        resample_futures.append((future, file, output_path))
+                
+                # Wait for all resampling to complete
+                for future, input_file, output_path in resample_futures:
+                    try:
+                        if future.result():
+                            print(f"Successfully resampled: {os.path.basename(input_file)}")
+                            resampled_files.append(output_path)
+                        else:
+                            print(f"Failed to resample: {os.path.basename(input_file)}")
+                            resampling_success = False
+                    except Exception as e:
+                        print(f"Error processing {input_file}: {str(e)}")
+                        resampling_success = False
+            
+            # Verify all bands were resampled
+            expected_count = len([f for f in extracted_files if f.endswith('.TIF')])
+            actual_count = len(resampled_files)
+            
+            if not resampling_success or actual_count != expected_count:
+                raise Exception(f"Resampling incomplete. Expected {expected_count} bands, got {actual_count}")
+            
+            # Clean up original files only after successful resampling
+            if resampling_success:
+                for file in extracted_files:
+                    try:
+                        os.remove(file)
+                        print(f"Removed original file: {os.path.basename(file)}")
+                    except Exception as e:
+                        print(f"Error removing {file}: {str(e)}")
+                
+                # Save checkpoint after successful resampling
+                self.data_manager.save_checkpoint(
+                    -1,
+                    0,
+                    0,
+                    f'landsat_resample_{location_id}'
+                )
+            else:
+                raise Exception("Resampling failed, keeping original files")
 
-        return scene_id
+            # After resampling, delete the scene directory if it's empty
+            if not os.listdir(scene_dir):
+                os.rmdir(scene_dir)
+                print(f"Deleted empty scene directory: {scene_dir}")
+
+            return scene_id
+            
+        except Exception as e:
+            print(f"Error processing {scene_id}: {str(e)}")
+            # Clean up any partial resampled files on error
+            for file in resampled_files:
+                try:
+                    os.remove(file)
+                except:
+                    pass
+            raise
 
     def _download_single_file(self, download, location_id=None):
         """Download file with coordinate tracking"""
@@ -311,6 +367,15 @@ class LandsatFetcher:
     
                 # Extract bands and get scene ID
                 scene_id = self.extract_and_resample_bands(filepath, location_id)
+                
+                # Save checkpoint after successful download and processing
+                self.data_manager.save_checkpoint(
+                    -1,  # Use -1 to indicate individual file checkpoint
+                    0,   # These counts will be updated by main process
+                    0,
+                    f'landsat_download_{location_id}'
+                )
+                
                 return filepath, scene_id
                 
         except Exception as e:

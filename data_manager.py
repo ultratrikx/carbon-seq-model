@@ -2,8 +2,14 @@ import pandas as pd
 from pathlib import Path
 import uuid
 import os
+<<<<<<< HEAD
 import logging
 from datetime import datetime
+=======
+import json
+import datetime
+import logging
+>>>>>>> 1c54ca0022e8f864771e022c50c4d37cffdfa670
 
 class DataManager:
     def __init__(self, csv_file, output_dir="processed_data"):
@@ -79,6 +85,7 @@ class DataManager:
         return self.data[self.data['landsat_scene_id'].notna() & 
                         self.data['soilgrids_id'].notna()]
 
+<<<<<<< HEAD
     def get_next_batch(self, batch_size=10, processed_ids=None):
         """Get next batch of unprocessed locations"""
         if processed_ids is None:
@@ -98,3 +105,97 @@ class DataManager:
         if progress_file.exists():
             return set(pd.read_csv(progress_file)['0'].values)
         return set()
+=======
+    def save_checkpoint(self, batch_index, processed_count, error_count, stage='batch'):
+        """Save checkpoint data with processing stage information"""
+        checkpoint = {
+            'batch_index': batch_index,
+            'processed_count': processed_count,
+            'error_count': error_count,
+            'stage': stage,
+            'timestamp': datetime.datetime.now().isoformat(),
+            'processed_locations': self.data[self.data['soilgrids_id'].notna() | 
+                                          self.data['landsat_scene_id'].notna()]
+                                 ['location_id'].tolist()
+        }
+        
+        # Save main checkpoint
+        checkpoint_path = self.base_dir / 'checkpoint.json'
+        with open(checkpoint_path, 'w') as f:
+            json.dump(checkpoint, f)
+            
+        # Save timestamped backup checkpoint
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_file = self.base_dir / f'checkpoint_{timestamp}.json'
+        with open(backup_file, 'w') as f:
+            json.dump(checkpoint, f)
+            
+        # Cleanup old checkpoints
+        try:
+            checkpoints = sorted(self.base_dir.glob('checkpoint_*.json'))
+            if len(checkpoints) > 10:  # Keep only 10 most recent backups
+                for old_checkpoint in checkpoints[:-10]:
+                    try:
+                        old_checkpoint.unlink()
+                        logging.debug(f"Removed old checkpoint: {old_checkpoint}")
+                    except Exception as e:
+                        logging.warning(f"Failed to remove old checkpoint {old_checkpoint}: {e}")
+        except Exception as e:
+            logging.error(f"Error during checkpoint cleanup: {e}")
+
+    def load_checkpoint(self):
+        """Load checkpoint data with enhanced error handling"""
+        try:
+            # Try loading main checkpoint first
+            with open(self.base_dir / 'checkpoint.json', 'r') as f:
+                checkpoint = json.load(f)
+                
+            # Verify checkpoint data and restore processed locations
+            if 'processed_locations' in checkpoint:
+                for loc_id in checkpoint['processed_locations']:
+                    if loc_id in self.data['location_id'].values:
+                        # Restore location data from master CSV
+                        self._save_data()
+                        
+            return checkpoint
+            
+        except FileNotFoundError:
+            # Try loading latest backup checkpoint
+            try:
+                checkpoints = sorted(self.base_dir.glob('checkpoint_*.json'))
+                if checkpoints:
+                    with open(checkpoints[-1], 'r') as f:
+                        return json.load(f)
+            except Exception:
+                pass
+            return None
+        except Exception as e:
+            logging.error(f"Error loading checkpoint: {str(e)}")
+            return None
+
+    def clear_checkpoint(self):
+        """Clear checkpoint file"""
+        try:
+            (self.base_dir / 'checkpoint.json').unlink()
+        except FileNotFoundError:
+            pass
+
+    def list_checkpoints(self):
+        """List all available checkpoints"""
+        checkpoints = []
+        try:
+            # Try main checkpoint
+            with open(self.base_dir / 'checkpoint.json', 'r') as f:
+                checkpoints.append(json.load(f))
+            
+            # Get all backup checkpoints
+            backup_files = sorted(self.base_dir.glob('checkpoint_*.json'))
+            for bf in backup_files:
+                with open(bf, 'r') as f:
+                    checkpoints.append(json.load(f))
+                    
+        except Exception as e:
+            logging.error(f"Error listing checkpoints: {e}")
+        
+        return checkpoints
+>>>>>>> 1c54ca0022e8f864771e022c50c4d37cffdfa670

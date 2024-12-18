@@ -9,6 +9,11 @@ import warnings
 import backoff
 import urllib3
 import tarfile
+<<<<<<< HEAD
+=======
+import logging
+import subprocess
+>>>>>>> 1c54ca0022e8f864771e022c50c4d37cffdfa670
 import shutil
 from pathlib import Path
 from requests.adapters import HTTPAdapter
@@ -19,6 +24,9 @@ from data_process import DataProcessor
 from http.client import IncompleteRead
 from requests.exceptions import ConnectionError
 warnings.filterwarnings("ignore")
+
+USERNAME = "ArjunGupta"
+TOKEN = "RWHsOmS@KxK6lvrAVcj4N58L2Ub936ebsv@rpeibGyoA3ayArVU!gKLNqVnWE4br"
 
 class LandsatFetcher:
     def __init__(self, data_manager, max_workers=5):
@@ -222,107 +230,170 @@ class LandsatFetcher:
         """Extract bands, resample, and cleanup original files"""
         scene_id = Path(tar_path).stem.split('.')[0]
         print(f"\nProcessing {scene_id}")
-        
-        # Update data manager with scene ID
-        self.data_manager.update_landsat_scene(location_id, scene_id)
-        
-        scene_dir = os.path.join(self.bands_dir, scene_id)
-        if not os.path.exists(scene_dir):
-            os.makedirs(scene_dir)
-        
-        extracted_files = []
-        with tarfile.open(tar_path) as tar:
-            members = tar.getmembers()
-            band_files = [m for m in members if any(band in m.name for band in self.required_bands)]
-            
-            for band_file in band_files:
-                band_file.name = os.path.basename(band_file.name)
-                dest_path = os.path.join(scene_dir, band_file.name)
-                
-                print(f"Extracting {band_file.name}")
-                with tar.extractfile(band_file) as source:
-                    with open(dest_path, 'wb') as target:
-                        target.write(source.read())
-                extracted_files.append(dest_path)
-        
-        # Delete tar file immediately after extraction
-        os.remove(tar_path)
-        
-        # Find corresponding SoilGrids file
-        soilgrids_file = os.path.join(
-            str(self.data_manager.soilgrids_dir),
-            "tifs",
-            f"location_{location_id}",
-            "soc_0-5cm_mean.TIF"
-        )
-        
-        # Resample each extracted band and delete original
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            resample_futures = []
-            for file in extracted_files:
-                if file.endswith('.TIF'):
-                    output_path = os.path.join(
-                        self.resampled_dir,
-                        f"resampled_{location_id}_{os.path.basename(file)}"
-                    )
-                    future = executor.submit(
-                        self.processor.resample_landsat,
-                        file,
-                        soilgrids_file,
-                        output_path
-                    )
-                    resample_futures.append((future, file))
-            
-            # Wait for all resampling to complete
-            for future, file in resample_futures:
-                try:
-                    if future.result():
-                        print(f"Successfully resampled and removed: {file}")
-                except Exception as e:
-                    print(f"Error processing {file}: {str(e)}")
-        
-        # After resampling, delete the scene directory if it's empty
-        if not os.listdir(scene_dir):
-            os.rmdir(scene_dir)
-            print(f"Deleted empty scene directory: {scene_dir}")
 
-        return scene_id
+        extracted_files = []
+        resampled_files = []
+        tar_file = None
+
+        try:
+            # Update data manager with scene ID
+            self.data_manager.update_landsat_scene(location_id, scene_id)
+
+            scene_dir = os.path.join(self.bands_dir, scene_id)
+            os.makedirs(scene_dir, exist_ok=True)
+
+            # Verify the TAR file integrity before extraction
+            if not tarfile.is_tarfile(tar_path):
+                raise Exception(f"Invalid or corrupted TAR file: {tar_path}")
+
+            # Extract files with proper file handling
+            try:
+                tar_file = tarfile.open(tar_path)
+                members = tar_file.getmembers()
+                band_files = [m for m in members if any(band in m.name.upper() for band in self.required_bands)]
+
+                if len(band_files) < len(self.required_bands):
+                    raise Exception(f"Missing required bands in {tar_path}")
+
+                for band_file in band_files:
+                    band_file.name = os.path.basename(band_file.name)
+                    dest_path = os.path.join(scene_dir, band_file.name)
+
+                    print(f"Extracting {band_file.name}")
+                    with tar_file.extractfile(band_file) as source, open(dest_path, 'wb') as target:
+                        shutil.copyfileobj(source, target)
+                    extracted_files.append(dest_path)
+
+                    # Validate the extracted file
+                    if os.path.getsize(dest_path) == 0:
+                        raise Exception(f"Extracted file is empty: {dest_path}")
+
+            finally:
+                if tar_file:
+                    tar_file.close()
+
+            # Ensure all files are properly closed
+            time.sleep(1)
+
+            # Resample files
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = []
+                for input_file in extracted_files:
+                    output_name = f"resampled_{location_id}_{os.path.basename(input_file)}"
+                    output_path = os.path.join(self.resampled_dir, output_name)
+                    cmd = [
+                        "gdalwarp",
+                        "-tr", "30", "30",
+                        "-r", "bilinear",
+                        "-overwrite",
+                        input_file,
+                        output_path
+                    ]
+                    futures.append(executor.submit(self._run_subprocess, cmd, output_path))
+
+                # Collect resampled files
+                for future in as_completed(futures):
+                    output_path = future.result()
+                    if output_path:
+                        resampled_files.append(output_path)
+
+            # Verify that all bands have been resampled
+            expected_bands = [band for band in self.required_bands if band.endswith('.TIF')]
+            if len(resampled_files) != len(expected_bands):
+                raise Exception(f"Resampling incomplete. Expected {len(expected_bands)} bands, got {len(resampled_files)}")
+
+            # Delete the TAR file after resampling is complete
+            os.remove(tar_path)
+            print(f"Deleted tar file: {tar_path}")
+
+            # Clean up extracted files after resampling
+            for file in extracted_files:
+                os.remove(file)
+                print(f"Deleted original file: {file}")
+
+            # Remove scene directory if empty
+            if not os.listdir(scene_dir):
+                os.rmdir(scene_dir)
+                print(f"Deleted empty scene directory: {scene_dir}")
+
+            return scene_id
+
+        except Exception as e:
+            print(f"Error processing {scene_id}: {str(e)}")
+            # Clean up in case of error
+            for file in resampled_files + extracted_files:
+                if os.path.exists(file):
+                    os.remove(file)
+                    print(f"Cleaned up file: {file}")
+
+            # Attempt to delete the TAR file if it still exists
+            if os.path.exists(tar_path):
+                os.remove(tar_path)
+
+            raise
+
+    def _run_subprocess(self, cmd, output_path):
+        """Run subprocess command and handle exceptions"""
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            print(f"Successfully resampled: {os.path.basename(output_path)}")
+
+            # Validate the resampled file
+            if os.path.getsize(output_path) == 0:
+                raise Exception(f"Resampled file is empty: {output_path}")
+
+            return output_path
+
+        except subprocess.CalledProcessError as e:
+            print(f"Error during resampling: {e.stderr.decode().strip()}")
+            return None
 
     def _download_single_file(self, download, location_id=None):
         """Download file with coordinate tracking"""
         url = download['url']
-        print(f"Downloading: {url}")
-        
+        filepath = None
+
         try:
-            # Create a new session for this download
             with requests.Session() as session:
                 response = session.get(url, stream=True)
                 response.raise_for_status()
-                
-                # Use urllib.parse instead of cgi
+
                 content_disp = response.headers.get('Content-Disposition', '')
                 filename = content_disp.split('filename=')[-1].strip('"')
                 filename = self.unquote(filename)
                 filepath = os.path.join(self.output_dir, filename)
-    
+
+                # If file exists, delete it first
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+
                 total_size = int(response.headers.get('content-length', 0))
                 block_size = 8192
-                
+
                 with open(filepath, 'wb') as f:
                     with tqdm(total=total_size, unit='B', unit_scale=True) as pbar:
                         for chunk in response.iter_content(chunk_size=block_size):
                             if chunk:
                                 f.write(chunk)
                                 pbar.update(len(chunk))
-                
+                                f.flush()
+
                 print(f"Successfully downloaded: {filename}")
-    
+
+                # Verify the integrity of the downloaded file
+                if not tarfile.is_tarfile(filepath):
+                    raise Exception(f"Downloaded file is not a valid TAR archive: {filepath}")
+
                 # Extract bands and get scene ID
                 scene_id = self.extract_and_resample_bands(filepath, location_id)
+
                 return filepath, scene_id
-                
+
         except Exception as e:
             print(f"Download or extraction failed for {url}: {str(e)}")
+            # Clean up partial download
+            if filepath and os.path.exists(filepath):
+                os.remove(filepath)
             raise
 
     def logout(self):
@@ -415,63 +486,95 @@ class LandsatFetcher:
         return None
 
     def _process_single_coordinate(self, lat, lon, location_id):
-        """Process a single coordinate and download the best scene"""
-        try:
-            print(f"Processing lat: {lat}, lon: {lon}")
-            
-            date_range = {'start': '2024-06-01', 'end': '2024-07-31'}
-            scenes = self.search_scenes(lat, lon, date_range)
-            
-            if not scenes:
-                print(f"No scenes found for {lat}, {lon}")
-                return
-
-            best_scene = self.select_best_scene(scenes)
-            if not best_scene:
-                print(f"No suitable scenes found for {lat}, {lon}")
-                return
-
-            print(f"Selected best scene: {best_scene['displayId']} (Cloud cover: {best_scene['cloudCover']}%)")
-            
-            download_options = self.get_download_options([best_scene['entityId']])
-            
-            if not download_options:
-                print(f"No download options available for {best_scene['displayId']}")
-                return
-
-            # Request download for the full bundle
-            products = [{
-                'entityId': option['entityId'],
-                'productId': option['id']
-            } for option in download_options]
-
-            if products:
-                download_results = self.request_download(products)
+        retries = 3
+        success = False  # Track if we've successfully downloaded
+        
+        for attempt in range(retries):
+            try:
+                if success:  # Skip retry if we've already succeeded
+                    break
+                    
+                if attempt > 0:
+                    logging.info(f"Retry attempt {attempt+1} for location {location_id}")
+                    if not self.refresh_api_key():
+                        raise Exception("Failed to refresh API key")
+                    time.sleep(5 * attempt)  # Exponential backoff
                 
-                if download_results and 'availableDownloads' in download_results:
-                    # Pass location_id to download method
-                    with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                        futures = []
-                        for download in download_results['availableDownloads']:
-                            future = executor.submit(
-                                self._download_single_file,
-                                download,
-                                location_id
-                            )
-                            futures.append(future)
-                        
-                        for future in as_completed(futures):
-                            try:
-                                future.result()
-                            except Exception as e:
-                                print(f"Download failed: {str(e)}")
+                print(f"Processing lat: {lat}, lon: {lon}")
+                
+                date_range = {'start': '2024-06-01', 'end': '2024-07-31'}
+                scenes = self.search_scenes(lat, lon, date_range)
+                
+                if not scenes:
+                    print(f"No scenes found for {lat}, {lon}")
+                    return
+
+                best_scene = self.select_best_scene(scenes)
+                if not best_scene:
+                    print(f"No suitable scenes found for {lat}, {lon}")
+                    return
+
+                print(f"Selected best scene: {best_scene['displayId']} (Cloud cover: {best_scene['cloudCover']}%)")
+                
+                download_options = self.get_download_options([best_scene['entityId']])
+                
+                if not download_options:
+                    print(f"No download options available for {best_scene['displayId']}")
+                    return
+
+                products = [{
+                    'entityId': option['entityId'],
+                    'productId': option['id']
+                } for option in download_options]
+
+                if products:
+                    download_results = self.request_download(products)
+                    
+                    if download_results and 'availableDownloads' in download_results:
+                        download_success = True  # Track success for this batch
+                        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                            futures = []
+                            for download in download_results['availableDownloads']:
+                                future = executor.submit(
+                                    self._download_single_file,
+                                    download,
+                                    location_id
+                                )
+                                futures.append(future)
+                            
+                            # Wait for all downloads to complete
+                            for future in as_completed(futures):
+                                try:
+                                    result = future.result()
+                                    if result:  # If download was successful
+                                        success = True  # Mark overall process as successful
+                                        self.data_manager._save_data()  # Save progress
+                                except Exception as e:
+                                    print(f"Download failed: {str(e)}")
+                                    download_success = False
+                            
+                            if download_success:
+                                break  # Exit retry loop if downloads were successful
+                    else:
+                        print(f"Failed to get download URLs for {best_scene['displayId']}")
                 else:
-                    print(f"Failed to get download URLs for {best_scene['displayId']}")
-            else:
-                print(f"No valid products found for {best_scene['displayId']}")
+                    print(f"No valid products found for {best_scene['displayId']}")
+                    return  # No need to retry if no products found
+                    
+            except Exception as e:
+                print(f"Error processing coordinate {lat}, lon: {str(e)}")
+                if attempt == retries - 1:  # Only raise on final attempt
+                    raise
+
+    def refresh_api_key(self):
+        """Refresh API key to prevent session timeout"""
+        try:
+            self.logout()
+            time.sleep(1)
+            return self.login(USERNAME, TOKEN)
         except Exception as e:
-            print(f"Error processing coordinate {lat}, lon: {str(e)}")
-            raise
+            logging.error(f"Failed to refresh API key: {str(e)}")
+            return False
 
     def _download_single_file_only(self, lat, lon, location_id):
         """Download file only, with progress bar and retry mechanism"""
@@ -582,3 +685,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

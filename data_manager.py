@@ -2,9 +2,14 @@ import pandas as pd
 from pathlib import Path
 import uuid
 import os
+<<<<<<< HEAD
+import logging
+from datetime import datetime
+=======
 import json
 import datetime
 import logging
+>>>>>>> 1c54ca0022e8f864771e022c50c4d37cffdfa670
 
 class DataManager:
     def __init__(self, csv_file, output_dir="processed_data"):
@@ -26,6 +31,28 @@ class DataManager:
         self.soilgrids_dir = self.base_dir / "soilgrids_data"
         self.landsat_dir.mkdir(exist_ok=True)
         self.soilgrids_dir.mkdir(exist_ok=True)
+        
+        # Setup logging
+        self.log_dir = self.base_dir / "logs"
+        self.log_dir.mkdir(exist_ok=True)
+        self.setup_logging()
+        
+        self.logger.info(f"DataManager initialized with {len(self.data)} locations")
+
+    def setup_logging(self):
+        """Setup logging configuration"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = self.log_dir / f"processing_{timestamp}.log"
+        
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file),
+                logging.StreamHandler()
+            ]
+        )
+        self.logger = logging.getLogger('DataManager')
 
     def update_landsat_scene(self, location_id, scene_id):
         """Update Landsat scene ID for a location"""
@@ -58,6 +85,27 @@ class DataManager:
         return self.data[self.data['landsat_scene_id'].notna() & 
                         self.data['soilgrids_id'].notna()]
 
+<<<<<<< HEAD
+    def get_next_batch(self, batch_size=10, processed_ids=None):
+        """Get next batch of unprocessed locations"""
+        if processed_ids is None:
+            processed_ids = set()
+            
+        mask = ~self.data['location_id'].isin(processed_ids)
+        return self.data[mask].head(batch_size)
+
+    def save_progress(self, processed_ids):
+        """Save processing progress"""
+        progress_file = self.base_dir / "processing_progress.csv"
+        pd.Series(list(processed_ids)).to_csv(progress_file, index=False)
+        
+    def load_progress(self):
+        """Load processing progress"""
+        progress_file = self.base_dir / "processing_progress.csv"
+        if progress_file.exists():
+            return set(pd.read_csv(progress_file)['0'].values)
+        return set()
+=======
     def save_checkpoint(self, batch_index, processed_count, error_count, stage='batch'):
         """Save checkpoint data with processing stage information"""
         checkpoint = {
@@ -150,3 +198,4 @@ class DataManager:
             logging.error(f"Error listing checkpoints: {e}")
         
         return checkpoints
+>>>>>>> 1c54ca0022e8f864771e022c50c4d37cffdfa670

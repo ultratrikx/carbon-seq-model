@@ -9,8 +9,11 @@ import warnings
 import backoff
 import urllib3
 import tarfile
+<<<<<<< HEAD
+=======
 import logging
 import subprocess
+>>>>>>> 1c54ca0022e8f864771e022c50c4d37cffdfa670
 import shutil
 from pathlib import Path
 from requests.adapters import HTTPAdapter
@@ -18,6 +21,8 @@ from urllib3.util.retry import Retry
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from data_process import DataProcessor
+from http.client import IncompleteRead
+from requests.exceptions import ConnectionError
 warnings.filterwarnings("ignore")
 
 USERNAME = "ArjunGupta"
@@ -80,6 +85,14 @@ class LandsatFetcher:
             self.resampled_dir,  # Corrected resampled directory
             os.path.join(str(data_manager.base_dir), "master_locations.csv")
         )
+        self.session_start_time = None
+        self.session_duration = 3600  # 1 hour session duration
+        
+    def is_session_valid(self):
+        """Check if current session is still valid"""
+        if not self.session_start_time or not self.api_key:
+            return False
+        return (time.time() - self.session_start_time) < self.session_duration
 
     @backoff.on_exception(
         backoff.expo,
@@ -129,6 +142,7 @@ class LandsatFetcher:
         self.api_key = self.send_request("login-token", login_payload)
         
         if self.api_key:
+            self.session_start_time = time.time()
             print('\nLogin Successful!')
             return True
         return False
@@ -561,6 +575,96 @@ class LandsatFetcher:
         except Exception as e:
             logging.error(f"Failed to refresh API key: {str(e)}")
             return False
+
+    def _download_single_file_only(self, lat, lon, location_id):
+        """Download file only, with progress bar and retry mechanism"""
+        try:
+            date_range = {'start': '2024-06-01', 'end': '2024-07-31'}
+            scenes = self.search_scenes(lat, lon, date_range)
+            
+            if not scenes:
+                return None
+
+            best_scene = self.select_best_scene(scenes)
+            if not best_scene:
+                return None
+
+            download_options = self.get_download_options([best_scene['entityId']])
+            if not download_options:
+                return None
+
+            products = [{
+                'entityId': option['entityId'],
+                'productId': option['id']
+            } for option in download_options]
+
+            if not products:
+                return None
+
+            download_results = self.request_download(products)
+            if not download_results or 'availableDownloads' not in download_results:
+                return None
+
+            # Download first available file
+            download = download_results['availableDownloads'][0]
+            url = download['url']
+            
+            # Setup retry strategy
+            retry_strategy = Retry(
+                total=5,
+                status_forcelist=[429, 500, 502, 503, 504],
+                method_whitelist=["GET"],
+                backoff_factor=1
+            )
+            adapter = HTTPAdapter(max_retries=retry_strategy)
+            
+            with requests.Session() as session:
+                session.mount("https://", adapter)
+                session.mount("http://", adapter)
+                
+                response = session.get(url, stream=True, timeout=30)
+                response.raise_for_status()
+                
+                content_disp = response.headers.get('Content-Disposition', '')
+                filename = content_disp.split('filename=')[-1].strip('"')
+                filename = self.unquote(filename)
+                filepath = os.path.join(self.output_dir, filename)
+
+                total_size = int(response.headers.get('content-length', 0))
+                block_size = 8192
+                
+                with open(filepath, 'wb') as f:
+                    with tqdm(total=total_size, unit='B', unit_scale=True, desc=f"Location {location_id}") as pbar:
+                        for chunk in response.iter_content(chunk_size=block_size):
+                            if chunk:
+                                f.write(chunk)
+                                pbar.update(len(chunk))
+                
+                return filepath
+                
+        except (ConnectionError, IncompleteRead) as e:
+            print(f"Download error for {lat}, {lon}: {str(e)}")
+            return None
+        except Exception as e:
+            print(f"Download failed for {lat}, {lon}: {str(e)}")
+            return None
+
+    def cleanup_temp_files(self):
+        """Clean up any temporary files and empty directories"""
+        try:
+            # Clean up temp directory
+            if os.path.exists(self.temp_dir):
+                shutil.rmtree(self.temp_dir)
+                os.makedirs(self.temp_dir)
+                
+            # Remove empty directories in bands_dir
+            for root, dirs, files in os.walk(self.bands_dir, topdown=False):
+                for dir_name in dirs:
+                    dir_path = os.path.join(root, dir_name)
+                    if not os.listdir(dir_path):
+                        os.rmdir(dir_path)
+        except Exception as e:
+            print(f"Error during cleanup: {str(e)}")
 
 def main():
     fetcher = LandsatFetcher()

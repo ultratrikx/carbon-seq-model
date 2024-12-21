@@ -9,3 +9,7 @@ requests
 tqdm
 backoff
 urllib3
+torch
+torchvision
+timm
+scikit-learn
